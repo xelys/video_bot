@@ -1,0 +1,1 @@
+This is a slack app that takes links to streaming video websites and adds direct URLs to video streams, allowing you to open them in media player instead. It can be deployed to AWS Lambda on your own AWS account.

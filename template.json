@@ -1,0 +1,502 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Lambda and API Gateway",
+  "Parameters": {
+    "SigningSecret": {
+      "Description": "Signing secret for your slack app",
+      "Type": "String",
+      "Default": ""
+    },
+    "OAUTHToken": {
+      "Description": "OAUTH token for your slack app",
+      "Type": "String",
+      "Default": ""
+    }
+  },
+  "Resources": {
+    "MessagesTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "channel",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "message_ts",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "file_name",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "channel",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "message_ts",
+            "KeyType": "RANGE"
+          }
+        ],
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "messages_file_name_index",
+            "KeySchema": [
+              {
+                "AttributeName": "file_name",
+                "KeyType": "HASH"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "INCLUDE",
+              "NonKeyAttributes": [
+                "stream_url"
+              ]
+            }
+          }
+        ],
+        "TableName": "messages"
+      }
+    },
+    "LambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "dynamodb",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "1",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:Scan",
+                    "dynamodb:PutItem",
+                    "dynamodb:GetItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query",
+                    "dynamodb:UpdateItem"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "arn:aws:dynamodb:",
+                          {
+                            "Ref": "AWS::Region"
+                          },
+                          ":",
+                          {
+                            "Ref": "AWS::AccountId"
+                          },
+                          ":table/messages*"
+                        ]
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "EventHandlerLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": "./eventHandler",
+        "Environment": {
+          "Variables": {
+            "PROCESS_FUNCTION": {
+              "Ref": "ProcessURLLambda"
+            },
+            "SIGNING_KEY": {
+              "Ref": "SigningSecret"
+            }
+          }
+        },
+        "Description": "slack event handler",
+        "Handler": "main.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "LambdaRole",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs8.10",
+        "Timeout": 3
+      }
+    },
+    "PermissionForAPIGatewayToInvokeEventHandlerLambda": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:invokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "EventHandlerLambda",
+            "Arn"
+          ]
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:aws:execute-api:",
+              {
+                "Ref": "AWS::Region"
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              ":",
+              {
+                "Ref": "RestApi"
+              },
+              "/*"
+            ]
+          ]
+        }
+      }
+    },
+    "ProcessURLLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": "./processURL",
+        "Environment": {
+          "Variables": {
+            "OAUTH_TOKEN": {
+              "Ref": "OAUTHToken"
+            },
+            "REDIRECT_BASE_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  "https://",
+                  {
+                    "Ref": "RestApi"
+                  },
+                  ".execute-api.",
+                  {
+                    "Ref": "AWS::Region"
+                  },
+                  ".amazonaws.com/v1/stream/"
+                ]
+              ]
+            }
+          }
+        },
+        "Description": "url processor",
+        "Handler": "main.handler",
+        "MemorySize": 128,
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "LambdaRole",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs8.10",
+        "Timeout": 60
+      }
+    },
+    "ScheduledRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "ScheduledRule",
+        "ScheduleExpression": "rate(1 hour)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "ProcessURLLambda",
+                "Arn"
+              ]
+            },
+            "Id": "TargetFunctionV1"
+          }
+        ]
+      }
+    },
+    "PermissionForEventsToInvokeLambda": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "ProcessURLLambda"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "ScheduledRule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "RedirectLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": "./redirect.js",
+        "Description": "generic handler",
+        "Handler": "redirect.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "LambdaRole",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs8.10",
+        "Timeout": 3
+      }
+    },
+    "RedirectLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:invokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "RedirectLambda",
+            "Arn"
+          ]
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:aws:execute-api:",
+              {
+                "Ref": "AWS::Region"
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              ":",
+              {
+                "Ref": "RestApi"
+              },
+              "/*"
+            ]
+          ]
+        }
+      }
+    },
+    "RestApi": {
+      "Type": "AWS::ApiGateway::RestApi",
+      "Properties": {
+        "Name": "API Gateway video_bot"
+      }
+    },
+    "EventResource": {
+      "Type": "AWS::ApiGateway::Resource",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ParentId": {
+          "Fn::GetAtt": [
+            "RestApi",
+            "RootResourceId"
+          ]
+        },
+        "PathPart": "event"
+      }
+    },
+    "PostEvent": {
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ResourceId": {
+          "Ref": "EventResource"
+        },
+        "HttpMethod": "POST",
+        "AuthorizationType": "NONE",
+        "Integration": {
+          "Type": "AWS_PROXY",
+          "IntegrationHttpMethod": "POST",
+          "Uri": {
+            "Fn::Join": [
+              "",
+              [
+                "arn:aws:apigateway:",
+                {
+                  "Ref": "AWS::Region"
+                },
+                ":lambda:path/2015-03-31/functions/",
+                {
+                  "Fn::GetAtt": [
+                    "EventHandlerLambda",
+                    "Arn"
+                  ]
+                },
+                "/invocations"
+              ]
+            ]
+          },
+          "PassthroughBehavior": "WHEN_NO_MATCH"
+        }
+      }
+    },
+    "RedirectResourceBase": {
+      "Type": "AWS::ApiGateway::Resource",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ParentId": {
+          "Fn::GetAtt": [
+            "RestApi",
+            "RootResourceId"
+          ]
+        },
+        "PathPart": "stream"
+      }
+    },
+    "RedirectResource": {
+      "Type": "AWS::ApiGateway::Resource",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ParentId": {
+          "Ref": "RedirectResourceBase"
+        },
+        "PathPart": "{file_name}"
+      }
+    },
+    "GetRedirect": {
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ResourceId": {
+          "Ref": "RedirectResource"
+        },
+        "HttpMethod": "GET",
+        "AuthorizationType": "NONE",
+        "Integration": {
+          "Type": "AWS_PROXY",
+          "IntegrationHttpMethod": "POST",
+          "Uri": {
+            "Fn::Join": [
+              "",
+              [
+                "arn:aws:apigateway:",
+                {
+                  "Ref": "AWS::Region"
+                },
+                ":lambda:path/2015-03-31/functions/",
+                {
+                  "Fn::GetAtt": [
+                    "RedirectLambda",
+                    "Arn"
+                  ]
+                },
+                "/invocations"
+              ]
+            ]
+          },
+          "PassthroughBehavior": "WHEN_NO_MATCH"
+        }
+      }
+    },
+    "RestApiDeployment": {
+      "Type": "AWS::ApiGateway::Deployment",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        }
+      },
+      "DependsOn": [
+        "PostEvent",
+        "GetRedirect"
+      ]
+    },
+    "DeploymentStage": {
+      "Type": "AWS::ApiGateway::Stage",
+      "Properties": {
+        "StageName": "v1",
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "DeploymentId": {
+          "Ref": "RestApiDeployment"
+        }
+      }
+    },
+    "UsagePlan": {
+      "Type": "AWS::ApiGateway::UsagePlan",
+      "Properties": {
+        "ApiStages": [
+          {
+            "ApiId": {
+              "Ref": "RestApi"
+            },
+            "Stage": {
+              "Ref": "DeploymentStage"
+            }
+          }
+        ],
+        "Description": "Video Bot's usage plan",
+        "Quota": {
+          "Limit": 100000,
+          "Period": "MONTH"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ApiId": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Ref": "RestApi"
+            },
+            ".execute-api.",
+            {
+              "Ref": "AWS::Region"
+            },
+            ".amazonaws.com/v1/event"
+          ]
+        ]
+      }
+    }
+  }
+}
